@@ -39,3 +39,4 @@ The following Go skills from `samber/cc-skills-golang` MUST always be applied wh
 - Keep raw token-count event JSON in SQLite for future reprocessing.
 - Unknown or local models are allowed in the UI but should be shown as unpriced until pricing is known.
 - Tests should cover parser behavior, cost calculation, SQLite idempotency, and HTTP handler basics.
+- Before turning code back to the user after Go changes, run `go test ./...`, `go vet ./...`, `golangci-lint run ./...`, and `govulncheck ./...`; report any command that could not be run.

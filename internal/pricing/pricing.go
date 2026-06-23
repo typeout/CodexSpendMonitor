@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,7 +73,7 @@ func FallbackToolPrices() []store.ToolPricingSnapshot {
 	}
 }
 
-func (s *Service) Refresh(ctx context.Context) (int, error) {
+func (s *Service) Refresh(ctx context.Context) (count int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, OpenAIPricingURL, nil)
 	if err != nil {
 		return 0, fmt.Errorf("building pricing request: %w", err)
@@ -81,7 +82,11 @@ func (s *Service) Refresh(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("fetching OpenAI pricing: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing pricing response: %w", closeErr))
+		}
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return 0, fmt.Errorf("fetching OpenAI pricing: status %s", resp.Status)
 	}

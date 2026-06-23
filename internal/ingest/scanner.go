@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -136,9 +137,7 @@ func sessionFiles(codexPath string) ([]string, error) {
 	return files, nil
 }
 
-func (s *Scanner) importFile(ctx context.Context, path string) (ScanResult, error) {
-	var result ScanResult
-
+func (s *Scanner) importFile(ctx context.Context, path string) (result ScanResult, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return result, fmt.Errorf("stat file: %w", err)
@@ -155,7 +154,11 @@ func (s *Scanner) importFile(ctx context.Context, path string) (ScanResult, erro
 	if err != nil {
 		return result, fmt.Errorf("opening file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing session file: %w", closeErr))
+		}
+	}()
 
 	hash := sha256.New()
 	reader := io.TeeReader(file, hash)

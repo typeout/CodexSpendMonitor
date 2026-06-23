@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	defer srcFile.Close()
+	defer closeFile(srcFile)
 
 	src, _, err := image.Decode(srcFile)
 	if err != nil {
@@ -54,7 +55,6 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	defer out.Close()
 
 	write16(out, 0)
 	write16(out, 1)
@@ -66,7 +66,7 @@ func main() {
 		if size == 256 {
 			width = 0
 		}
-		out.Write([]byte{width, width, 0, 0})
+		writeAll(out, []byte{width, width, 0, 0})
 		write16(out, 1)
 		write16(out, 32)
 		write32(out, uint32(len(images[i])))
@@ -75,8 +75,12 @@ func main() {
 	}
 	for _, data := range images {
 		if _, err := out.Write(data); err != nil {
+			_ = out.Close()
 			fatal(err)
 		}
+	}
+	if err := out.Close(); err != nil {
+		fatal(err)
 	}
 }
 
@@ -101,6 +105,18 @@ func write16(file *os.File, value uint16) {
 
 func write32(file *os.File, value uint32) {
 	if err := binary.Write(file, binary.LittleEndian, value); err != nil {
+		fatal(err)
+	}
+}
+
+func writeAll(writer io.Writer, data []byte) {
+	if _, err := writer.Write(data); err != nil {
+		fatal(err)
+	}
+}
+
+func closeFile(file *os.File) {
+	if err := file.Close(); err != nil {
 		fatal(err)
 	}
 }

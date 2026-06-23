@@ -3,9 +3,11 @@
 package tray
 
 type Options struct {
-	Tooltip string
-	OnOpen  func()
-	OnQuit  func()
+	Tooltip      string
+	IconPath     string
+	TodaySummary func() string
+	OnOpen       func()
+	OnQuit       func()
 }
 
 func Run(options Options) error {

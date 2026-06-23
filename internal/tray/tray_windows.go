@@ -3,6 +3,7 @@ package tray
 import (
 	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -252,12 +253,16 @@ func loadTrayIcon(path string) win.HICON {
 	return win.LoadIcon(0, win.MAKEINTRESOURCE(win.IDI_APPLICATION))
 }
 
-func iconFromPNG(path string, size int) (win.HICON, error) {
+func iconFromPNG(path string, size int) (icon win.HICON, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing tray icon file: %w", closeErr))
+		}
+	}()
 
 	src, err := png.Decode(file)
 	if err != nil {

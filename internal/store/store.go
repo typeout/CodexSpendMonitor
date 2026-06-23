@@ -22,6 +22,17 @@ const (
 
 var windowsUserPathRE = regexp.MustCompile(`(?i)(?:^|[\\/])Users[\\/]([^\\/]+)(?:[\\/]|$)`)
 
+var knownSQLiteIdentifiers = map[string]bool{
+	"pricing_snapshots": true,
+	"usage_events":      true,
+}
+
+var knownColumnDefinitions = map[string]string{
+	"billing_tier": "TEXT NOT NULL DEFAULT 'standard'",
+	"context_kind": "TEXT NOT NULL DEFAULT 'short'",
+}
+
+// Store wraps the application's SQLite database.
 type Store struct {
 	db *sql.DB
 }
@@ -145,6 +156,7 @@ type DailySpend struct {
 	UnpricedEvents int
 }
 
+// Open creates or opens the SQLite database at path and applies the app schema.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -161,12 +173,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	store := &Store{db: db}
 	if err := store.migrate(ctx); err != nil {
-		db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
 	return store, nil
 }
 
+// Close closes the underlying database connection pool.
 func (s *Store) Close() error {
 	return s.db.Close()
 }
@@ -293,12 +305,20 @@ func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) (err error) {
+	if err := validateColumnMigration(table, column, definition); err != nil {
+		return err
+	}
+
+	rows, err := s.tableInfo(ctx, table)
 	if err != nil {
 		return fmt.Errorf("inspecting %s columns: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing %s column rows: %w", table, closeErr))
+		}
+	}()
 
 	for rows.Next() {
 		var cid int
@@ -322,7 +342,7 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 	return nil
 }
 
-func (s *Store) ensurePricingDimensions(ctx context.Context) error {
+func (s *Store) ensurePricingDimensions(ctx context.Context) (err error) {
 	hasTier, err := s.columnExists(ctx, "pricing_snapshots", "billing_tier")
 	if err != nil {
 		return err
@@ -335,7 +355,15 @@ func (s *Store) ensurePricingDimensions(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("starting pricing migration: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("rolling back pricing migration: %w", rollbackErr))
+		}
+	}()
 
 	statements := []string{
 		`CREATE TABLE pricing_snapshots_new (
@@ -365,15 +393,27 @@ func (s *Store) ensurePricingDimensions(ctx context.Context) error {
 			return fmt.Errorf("migrating pricing dimensions: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
-func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+func (s *Store) columnExists(ctx context.Context, table, column string) (exists bool, err error) {
+	if !knownSQLiteIdentifiers[table] {
+		return false, fmt.Errorf("unknown sqlite table identifier %q", table)
+	}
+
+	rows, err := s.tableInfo(ctx, table)
 	if err != nil {
 		return false, fmt.Errorf("inspecting %s columns: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing %s column rows: %w", table, closeErr))
+		}
+	}()
 
 	for rows.Next() {
 		var cid int
@@ -394,6 +434,23 @@ func (s *Store) columnExists(ctx context.Context, table, column string) (bool, e
 	return false, nil
 }
 
+func (s *Store) tableInfo(ctx context.Context, table string) (*sql.Rows, error) {
+	if !knownSQLiteIdentifiers[table] {
+		return nil, fmt.Errorf("unknown sqlite table identifier %q", table)
+	}
+	return s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+}
+
+func validateColumnMigration(table, column, definition string) error {
+	if !knownSQLiteIdentifiers[table] {
+		return fmt.Errorf("unknown sqlite table identifier %q", table)
+	}
+	if knownColumnDefinitions[column] != definition {
+		return fmt.Errorf("unknown sqlite column migration %s.%s", table, column)
+	}
+	return nil
+}
+
 func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
@@ -406,6 +463,7 @@ func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
 	return value, true, nil
 }
 
+// SetSetting stores a string setting by key.
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO settings (key, value, updated_at)
@@ -418,6 +476,8 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return nil
 }
 
+// EnsureOwner records the current database owner and clears imported data when
+// the existing database appears to belong to a different Windows user.
 func (s *Store) EnsureOwner(ctx context.Context, owner string, currentUsernames []string) (bool, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
@@ -450,12 +510,22 @@ func (s *Store) EnsureOwner(ctx context.Context, owner string, currentUsernames 
 	return different, s.SetSetting(ctx, SettingDBOwner, owner)
 }
 
-func (s *Store) ClearImportedData(ctx context.Context) error {
+// ClearImportedData removes imported sessions and file fingerprints while
+// preserving settings and pricing snapshots.
+func (s *Store) ClearImportedData(ctx context.Context) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting cleanup transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("rolling back cleanup transaction: %w", rollbackErr))
+		}
+	}()
 
 	statements := []string{
 		`DELETE FROM tool_usage_events`,
@@ -471,10 +541,11 @@ func (s *Store) ClearImportedData(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing cleanup transaction: %w", err)
 	}
+	committed = true
 	return nil
 }
 
-func (s *Store) hasDifferentSessionUser(ctx context.Context, currentUsernames []string) (bool, error) {
+func (s *Store) hasDifferentSessionUser(ctx context.Context, currentUsernames []string) (different bool, err error) {
 	current := map[string]bool{}
 	for _, username := range currentUsernames {
 		username = strings.ToLower(strings.TrimSpace(username))
@@ -494,7 +565,11 @@ func (s *Store) hasDifferentSessionUser(ctx context.Context, currentUsernames []
 	if err != nil {
 		return false, fmt.Errorf("querying stored session users: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing stored session user rows: %w", closeErr))
+		}
+	}()
 
 	foundOther := false
 	foundCurrent := false
@@ -708,7 +783,7 @@ func (s *Store) DeletePricing(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *Store) Pricing(ctx context.Context) ([]PricingSnapshot, error) {
+func (s *Store) Pricing(ctx context.Context) (prices []PricingSnapshot, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, source_url, fetched_at, model, billing_tier, context_kind,
 			input_per_million, cached_input_per_million, output_per_million
@@ -718,9 +793,12 @@ func (s *Store) Pricing(ctx context.Context) ([]PricingSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying pricing: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing pricing rows: %w", closeErr))
+		}
+	}()
 
-	var prices []PricingSnapshot
 	for rows.Next() {
 		var fetchedAt string
 		var price PricingSnapshot
@@ -803,7 +881,7 @@ func (s *Store) DeleteToolPricing(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *Store) ToolPricing(ctx context.Context) ([]ToolPricingSnapshot, error) {
+func (s *Store) ToolPricing(ctx context.Context) (prices []ToolPricingSnapshot, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, source_url, fetched_at, tool_key, display_name, unit_label, unit_size, price_per_unit
 		FROM tool_pricing_snapshots
@@ -812,9 +890,12 @@ func (s *Store) ToolPricing(ctx context.Context) ([]ToolPricingSnapshot, error) 
 	if err != nil {
 		return nil, fmt.Errorf("querying tool pricing: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing tool pricing rows: %w", closeErr))
+		}
+	}()
 
-	var prices []ToolPricingSnapshot
 	for rows.Next() {
 		var fetchedAt string
 		var price ToolPricingSnapshot
@@ -830,7 +911,7 @@ func (s *Store) ToolPricing(ctx context.Context) ([]ToolPricingSnapshot, error) 
 	return prices, nil
 }
 
-func (s *Store) Dashboard(ctx context.Context) ([]DailySpend, []SessionSummary, error) {
+func (s *Store) Dashboard(ctx context.Context) (daily []DailySpend, ordered []SessionSummary, err error) {
 	events, err := s.allEventDetails(ctx, "")
 	if err != nil {
 		return nil, nil, err
@@ -851,9 +932,12 @@ func (s *Store) Dashboard(ctx context.Context) ([]DailySpend, []SessionSummary, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("querying sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing session summary rows: %w", closeErr))
+		}
+	}()
 
-	var ordered []SessionSummary
 	for rows.Next() {
 		var started string
 		var summary SessionSummary
@@ -933,7 +1017,6 @@ func (s *Store) Dashboard(ctx context.Context) ([]DailySpend, []SessionSummary, 
 		}
 	}
 
-	var daily []DailySpend
 	for _, spend := range dailyByDay {
 		daily = append(daily, *spend)
 	}
@@ -1013,7 +1096,7 @@ func (s *Store) DailySpendForDay(ctx context.Context, day time.Time) (DailySpend
 	return spend, nil
 }
 
-func (s *Store) allEventDetails(ctx context.Context, sessionID string) ([]EventDetail, error) {
+func (s *Store) allEventDetails(ctx context.Context, sessionID string) (events []EventDetail, err error) {
 	query := `
 		SELECT
 			e.id, e.session_id, e.event_index, e.timestamp, e.model,
@@ -1041,9 +1124,12 @@ func (s *Store) allEventDetails(ctx context.Context, sessionID string) ([]EventD
 	if err != nil {
 		return nil, fmt.Errorf("querying usage events: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing usage event rows: %w", closeErr))
+		}
+	}()
 
-	var events []EventDetail
 	for rows.Next() {
 		var ts string
 		var event EventDetail
@@ -1077,7 +1163,7 @@ func CalculateCost(inputTokens, cachedInputTokens, outputTokens int64, inputRate
 	return (float64(uncachedInputTokens)*inputRate + float64(cachedInputTokens)*cachedRate + float64(outputTokens)*outputRate) / 1_000_000
 }
 
-func (s *Store) allToolDetails(ctx context.Context, sessionID string) ([]ToolUsageDetail, error) {
+func (s *Store) allToolDetails(ctx context.Context, sessionID string) (events []ToolUsageDetail, err error) {
 	query := `
 		SELECT
 			e.id, e.session_id, e.event_index, e.timestamp, e.tool_key, e.tool_name, e.quantity,
@@ -1101,9 +1187,12 @@ func (s *Store) allToolDetails(ctx context.Context, sessionID string) ([]ToolUsa
 	if err != nil {
 		return nil, fmt.Errorf("querying tool usage events: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing tool usage event rows: %w", closeErr))
+		}
+	}()
 
-	var events []ToolUsageDetail
 	for rows.Next() {
 		var ts string
 		var event ToolUsageDetail
