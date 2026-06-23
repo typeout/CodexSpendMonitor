@@ -45,6 +45,11 @@ func main() {
 	flag.Parse()
 
 	logger := newLogger()
+	url := "http://" + *addr
+	if openExistingDashboard(url, logger) {
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -64,7 +69,7 @@ func main() {
 	handler := web.NewServer(db, scanner, pricer, logger)
 
 	application := &app{
-		url:     "http://" + *addr,
+		url:     url,
 		icon:    *iconPath,
 		ctx:     ctx,
 		stop:    stop,
@@ -84,6 +89,52 @@ func main() {
 		application.shutdown()
 		os.Exit(1)
 	}
+}
+
+func openExistingDashboard(url string, logger *slog.Logger) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		logger.Warn("check existing dashboard", "url", url, "error", err)
+		return false
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Warn("close existing dashboard response", "url", url, "error", err)
+		}
+	}()
+
+	if !isCodexSpendMonitor(resp) {
+		return false
+	}
+
+	logger.Info("dashboard already running", "url", url)
+	if err := trayutil.OpenURL(url); err != nil {
+		logger.Warn("open existing dashboard", "url", url, "error", err)
+	}
+	return true
+}
+
+func isCodexSpendMonitor(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	if resp.Header.Get("X-Codex-Spend-Monitor") == "1" {
+		return true
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(body), "<title>Codex Spend Monitor</title>")
 }
 
 func (a *app) run() error {

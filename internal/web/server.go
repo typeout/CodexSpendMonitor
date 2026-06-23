@@ -102,6 +102,8 @@ func NewServer(db *store.Store, scanner *ingest.Scanner, pricingService *pricing
 
 func (s *Server) Routes() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Codex-Spend-Monitor", "1")
+
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/":
 			s.dashboard(w, r)
