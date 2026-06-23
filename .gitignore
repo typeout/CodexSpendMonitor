@@ -1,0 +1,15 @@
+# Go build output
+/bin/
+/dist/
+*.exe
+*.test
+
+# Local databases and logs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+
+# Editor/system noise
+.DS_Store
+Thumbs.db
