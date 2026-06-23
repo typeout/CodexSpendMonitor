@@ -49,7 +49,7 @@ type turnContextPayload struct {
 }
 
 type eventMessagePayload struct {
-	Type string          `json:"type"`
+	Type string         `json:"type"`
 	Info tokenCountInfo `json:"info"`
 }
 
@@ -64,6 +64,15 @@ type tokenUsage struct {
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 	TotalTokens           int64 `json:"total_tokens"`
 }
+
+type responseItemPayload struct {
+	Type      string          `json:"type"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+	Input     json.RawMessage `json:"input"`
+}
+
+const longContextInputThreshold = 128_000
 
 func NewScanner(store *store.Store, logger *slog.Logger) *Scanner {
 	return &Scanner{store: store, logger: logger}
@@ -169,6 +178,12 @@ func (s *Scanner) importFile(ctx context.Context, path string) (ScanResult, erro
 		}
 		result.Events++
 	}
+	for _, event := range parsed.ToolEvents {
+		if err := s.store.UpsertToolUsageEvent(ctx, event); err != nil {
+			return result, err
+		}
+		result.Events++
+	}
 
 	if err := s.store.RecordImportedFile(ctx, path, info.Size(), info.ModTime(), hex.EncodeToString(hash.Sum(nil))); err != nil {
 		return result, err
@@ -180,6 +195,7 @@ func (s *Scanner) importFile(ctx context.Context, path string) (ScanResult, erro
 type parsedSession struct {
 	Session        store.Session
 	Events         []store.UsageEvent
+	ToolEvents     []store.ToolUsageEvent
 	MalformedLines int
 }
 
@@ -239,12 +255,33 @@ func parseSessionFile(reader io.Reader, path string) (parsedSession, error) {
 				EventIndex:            lineIndex,
 				Timestamp:             env.Timestamp,
 				Model:                 currentModel,
+				BillingTier:           billingTierFromLine(line),
+				ContextKind:           contextKindFromUsage(usage),
 				InputTokens:           usage.InputTokens,
 				CachedInputTokens:     usage.CachedInputTokens,
 				OutputTokens:          usage.OutputTokens,
 				ReasoningOutputTokens: usage.ReasoningOutputTokens,
 				TotalTokens:           usage.TotalTokens,
 				RawJSON:               string(line),
+			})
+		case "response_item":
+			var item responseItemPayload
+			if err := json.Unmarshal(env.Payload, &item); err != nil {
+				parsed.MalformedLines++
+				continue
+			}
+			toolKey, toolName, quantity := classifyToolCall(item)
+			if toolKey == "" {
+				continue
+			}
+			parsed.ToolEvents = append(parsed.ToolEvents, store.ToolUsageEvent{
+				SessionID:  parsed.Session.ID,
+				EventIndex: lineIndex,
+				Timestamp:  env.Timestamp,
+				ToolKey:    toolKey,
+				ToolName:   toolName,
+				Quantity:   quantity,
+				RawJSON:    string(line),
 			})
 		}
 	}
@@ -255,7 +292,55 @@ func parseSessionFile(reader io.Reader, path string) (parsedSession, error) {
 	for i := range parsed.Events {
 		parsed.Events[i].SessionID = parsed.Session.ID
 	}
+	for i := range parsed.ToolEvents {
+		parsed.ToolEvents[i].SessionID = parsed.Session.ID
+	}
 	return parsed, nil
+}
+
+func classifyToolCall(item responseItemPayload) (string, string, float64) {
+	if item.Type != "function_call" && item.Type != "tool_call" {
+		return "", "", 0
+	}
+	name := strings.ToLower(strings.TrimSpace(item.Name))
+	if name == "" {
+		return "", "", 0
+	}
+	switch name {
+	case "web_search", "web_search_preview":
+		return "web_search", item.Name, 1
+	case "image_web_search":
+		return "image_web_search", item.Name, 1
+	case "file_search":
+		return "file_search_tool_call", item.Name, 1
+	case "code_interpreter", "container", "hosted_shell", "hosted_shell_code_interpreter":
+		return "container_session", item.Name, 1
+	}
+	if name == "web.run" || name == "web_run" {
+		args := strings.ToLower(string(item.Arguments) + " " + string(item.Input))
+		switch {
+		case strings.Contains(args, "image_query"):
+			return "image_web_search", item.Name, 1
+		case strings.Contains(args, "search_query"):
+			return "web_search", item.Name, 1
+		}
+	}
+	return "", "", 0
+}
+
+func billingTierFromLine(line []byte) string {
+	lower := strings.ToLower(string(line))
+	if strings.Contains(lower, `"batch"`) || strings.Contains(lower, `"billing_tier":"batch"`) || strings.Contains(lower, `"service_tier":"batch"`) {
+		return "batch"
+	}
+	return "standard"
+}
+
+func contextKindFromUsage(usage tokenUsage) string {
+	if usage.InputTokens >= longContextInputThreshold {
+		return "long"
+	}
+	return "short"
 }
 
 func firstTime(primary, fallback time.Time) time.Time {

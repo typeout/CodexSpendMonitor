@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	osuser "os/user"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,7 +40,7 @@ func main() {
 	var (
 		addr     = flag.String("addr", "127.0.0.1:5077", "HTTP listen address")
 		dbPath   = flag.String("db", defaultDBPath(), "SQLite database path")
-		iconPath = flag.String("icon", defaultIconPath(), "PNG file to use for the Windows tray icon")
+		iconPath = flag.String("icon", "", "optional PNG file to override the embedded Windows tray icon")
 	)
 	flag.Parse()
 
@@ -52,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := ensureDefaults(ctx, db); err != nil {
+	if err := ensureDefaults(ctx, db, logger); err != nil {
 		logger.Error("initialize defaults", "error", err)
 		os.Exit(1)
 	}
@@ -125,7 +127,7 @@ func (a *app) todaySummary() string {
 		a.logger.Warn("load daily spend for tray", "error", err)
 		return "Today: unavailable"
 	}
-	text := fmt.Sprintf("Today: $%.6f", spend.TotalCost)
+	text := fmt.Sprintf("Today: $%.2f", store.RoundUpToCent(spend.TotalCost))
 	if spend.UnpricedEvents > 0 {
 		text += fmt.Sprintf(" (%d unpriced)", spend.UnpricedEvents)
 	}
@@ -144,16 +146,31 @@ func (a *app) shutdown() {
 	}
 }
 
-func ensureDefaults(ctx context.Context, db *store.Store) error {
-	if _, ok, err := db.Setting(ctx, store.SettingCodexPath); err != nil {
+func ensureDefaults(ctx context.Context, db *store.Store, logger *slog.Logger) error {
+	owner, usernames := currentUserIdentity()
+	reset, err := db.EnsureOwner(ctx, owner, usernames)
+	if err != nil {
 		return err
-	} else if !ok {
-		if err := db.SetSetting(ctx, store.SettingCodexPath, defaultCodexPath()); err != nil {
+	}
+	if reset {
+		logger.Info("cleared imported data for current Windows user", "owner", owner)
+	}
+
+	detectedPath := discoverCodexPath()
+	path, ok, err := db.Setting(ctx, store.SettingCodexPath)
+	if err != nil {
+		return err
+	}
+	if reset || !ok || strings.TrimSpace(path) == "" || !looksLikeCodexPath(path) {
+		if err := db.SetSetting(ctx, store.SettingCodexPath, detectedPath); err != nil {
 			return err
 		}
 	}
 
 	if err := db.SeedPricing(ctx, pricing.FallbackPrices()); err != nil {
+		return err
+	}
+	if err := db.SeedToolPricing(ctx, pricing.FallbackToolPrices()); err != nil {
 		return err
 	}
 	return nil
@@ -206,11 +223,70 @@ func defaultCodexPath() string {
 	return ".codex"
 }
 
-func defaultIconPath() string {
-	if cwd, err := os.Getwd(); err == nil {
-		return filepath.Join(cwd, "ChatGPT Image Jun 23, 2026, 12_33_06 PM.png")
+func discoverCodexPath() string {
+	candidates := []string{}
+	if value := strings.TrimSpace(os.Getenv("CODEX_HOME")); value != "" {
+		candidates = append(candidates, value)
 	}
-	return "ChatGPT Image Jun 23, 2026, 12_33_06 PM.png"
+	candidates = append(candidates, defaultCodexPath())
+
+	for _, candidate := range candidates {
+		if looksLikeCodexPath(candidate) {
+			return candidate
+		}
+	}
+	return candidates[len(candidates)-1]
+}
+
+func looksLikeCodexPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+
+	checks := []string{
+		filepath.Join(path, "sessions"),
+		filepath.Join(path, "archived_sessions"),
+		filepath.Join(path, "config.toml"),
+		filepath.Join(path, "auth.json"),
+	}
+	for _, check := range checks {
+		if _, err := os.Stat(check); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func currentUserIdentity() (string, []string) {
+	current, err := osuser.Current()
+	home, _ := os.UserHomeDir()
+	names := []string{}
+	if base := filepath.Base(home); base != "." && base != string(filepath.Separator) && base != "" {
+		names = append(names, base)
+	}
+	if err == nil && current != nil {
+		if current.Username != "" {
+			names = append(names, current.Username)
+			if _, username, ok := strings.Cut(current.Username, `\`); ok {
+				names = append(names, username)
+			}
+		}
+		if current.Uid != "" {
+			return current.Uid, names
+		}
+		if current.Username != "" {
+			return current.Username, names
+		}
+	}
+	if home != "" {
+		return home, names
+	}
+	return "", names
 }
 
 func newLogger() *slog.Logger {

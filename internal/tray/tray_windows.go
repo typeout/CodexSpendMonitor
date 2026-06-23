@@ -1,6 +1,8 @@
 package tray
 
 import (
+	"bytes"
+	_ "embed"
 	"fmt"
 	"image"
 	"image/png"
@@ -17,10 +19,14 @@ const (
 	trayMessage  = win.WM_USER + 1
 	ninSelect    = win.WM_USER
 	ninKeySelect = win.WM_USER + 1
+	menuToday    = 1000
 	menuOpen     = 1001
 	menuQuit     = 1002
 	trayUID      = 1
 )
+
+//go:embed app.png
+var embeddedIconPNG []byte
 
 type Options struct {
 	Tooltip      string
@@ -145,7 +151,8 @@ func showMenu(hwnd win.HWND) {
 	if active != nil && active.options.TodaySummary != nil {
 		todayText = active.options.TodaySummary()
 	}
-	appendMenuItem(menu, 0, todayText, win.MFT_STRING, win.MFS_DISABLED)
+	appendMenuItem(menu, menuToday, todayText, win.MFT_STRING, win.MFS_DEFAULT)
+	win.SetMenuDefaultItem(menu, menuToday, false)
 	insertSeparator(menu, 1)
 	appendMenu(menu, menuOpen, "Open Dashboard")
 	insertSeparator(menu, 3)
@@ -173,6 +180,8 @@ func showMenu(hwnd win.HWND) {
 
 func runCommand(hwnd win.HWND, command uint16) {
 	switch command {
+	case menuToday:
+		return
 	case menuOpen:
 		openDashboard()
 	case menuQuit:
@@ -237,6 +246,9 @@ func loadTrayIcon(path string) win.HICON {
 			return icon
 		}
 	}
+	if icon, err := iconFromPNGBytes(embeddedIconPNG, 32); err == nil && icon != 0 {
+		return icon
+	}
 	return win.LoadIcon(0, win.MAKEINTRESOURCE(win.IDI_APPLICATION))
 }
 
@@ -251,6 +263,18 @@ func iconFromPNG(path string, size int) (win.HICON, error) {
 	if err != nil {
 		return 0, err
 	}
+	return iconFromImage(src, size)
+}
+
+func iconFromPNGBytes(data []byte, size int) (win.HICON, error) {
+	src, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	return iconFromImage(src, size)
+}
+
+func iconFromImage(src image.Image, size int) (win.HICON, error) {
 	dst := image.NewRGBA(image.Rect(0, 0, size, size))
 	srcBounds := src.Bounds()
 	for y := 0; y < size; y++ {
