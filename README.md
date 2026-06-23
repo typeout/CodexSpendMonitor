@@ -24,7 +24,23 @@ Use `-addr` to change the bind address and `-db` to change the SQLite file path.
 For a background-style Windows executable without a console window:
 
 ```powershell
-go build -ldflags="-H=windowsgui" ./cmd/codex-spend-monitor
+.\scripts\build-gui.ps1
+```
+
+The GUI build always writes `dist\CodexSependMonitor.exe`.
+
+## Windows Startup
+
+After building the GUI executable, run this PowerShell command to start it when you sign in:
+
+```powershell
+$startup = [Environment]::GetFolderPath("Startup"); $target = (Resolve-Path ".\dist\CodexSependMonitor.exe").Path; $shortcut = Join-Path $startup "CodexSependMonitor.lnk"; $shell = New-Object -ComObject WScript.Shell; $link = $shell.CreateShortcut($shortcut); $link.TargetPath = $target; $link.WorkingDirectory = Split-Path $target; $link.Save()
+```
+
+To remove it from startup:
+
+```powershell
+Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath("Startup")) "CodexSependMonitor.lnk")
 ```
 
 ## Notes
