@@ -50,12 +50,13 @@ type turnContextPayload struct {
 }
 
 type eventMessagePayload struct {
-	Type string         `json:"type"`
-	Info tokenCountInfo `json:"info"`
+	Type string          `json:"type"`
+	Info *tokenCountInfo `json:"info"`
 }
 
 type tokenCountInfo struct {
-	LastTokenUsage tokenUsage `json:"last_token_usage"`
+	LastTokenUsage  *tokenUsage `json:"last_token_usage"`
+	TotalTokenUsage *tokenUsage `json:"total_token_usage"`
 }
 
 type tokenUsage struct {
@@ -205,6 +206,7 @@ type parsedSession struct {
 func parseSessionFile(reader io.Reader, path string) (parsedSession, error) {
 	var parsed parsedSession
 	var currentModel string
+	var lastCumulativeUsage *tokenUsage
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
@@ -249,7 +251,21 @@ func parseSessionFile(reader io.Reader, path string) (parsedSession, error) {
 			if message.Type != "token_count" {
 				continue
 			}
-			usage := message.Info.LastTokenUsage
+			if message.Info == nil {
+				continue
+			}
+			usage, ok := message.Info.usageDelta()
+			if !ok {
+				continue
+			}
+			cumulativeUsage, ok := message.Info.cumulativeUsage()
+			if !ok {
+				continue
+			}
+			if lastCumulativeUsage != nil && *lastCumulativeUsage == cumulativeUsage {
+				continue
+			}
+			lastCumulativeUsage = &cumulativeUsage
 			if currentModel == "" {
 				currentModel = "unknown"
 			}
@@ -299,6 +315,32 @@ func parseSessionFile(reader io.Reader, path string) (parsedSession, error) {
 		parsed.ToolEvents[i].SessionID = parsed.Session.ID
 	}
 	return parsed, nil
+}
+
+func (info *tokenCountInfo) usageDelta() (tokenUsage, bool) {
+	if info == nil {
+		return tokenUsage{}, false
+	}
+	if info.LastTokenUsage != nil {
+		return *info.LastTokenUsage, true
+	}
+	if info.TotalTokenUsage != nil {
+		return *info.TotalTokenUsage, true
+	}
+	return tokenUsage{}, false
+}
+
+func (info *tokenCountInfo) cumulativeUsage() (tokenUsage, bool) {
+	if info == nil {
+		return tokenUsage{}, false
+	}
+	if info.TotalTokenUsage != nil {
+		return *info.TotalTokenUsage, true
+	}
+	if info.LastTokenUsage != nil {
+		return *info.LastTokenUsage, true
+	}
+	return tokenUsage{}, false
 }
 
 func classifyToolCall(item responseItemPayload) (string, string, float64) {
