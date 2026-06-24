@@ -3,6 +3,7 @@ package ingest
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSessionFile(t *testing.T) {
@@ -43,5 +44,58 @@ func TestParseSessionFile(t *testing.T) {
 	toolEvent := got.ToolEvents[0]
 	if toolEvent.SessionID != "session-1" || toolEvent.ToolKey != "web_search" || toolEvent.ToolName != "web.run" || toolEvent.Quantity != 1 {
 		t.Fatalf("tool event = %+v", toolEvent)
+	}
+}
+
+func TestParseSessionFileSkipsEmptyAndDuplicateTokenCounts(t *testing.T) {
+	t.Parallel()
+
+	input := strings.NewReader(strings.Join([]string{
+		`{"timestamp":"2026-06-24T13:05:32Z","type":"session_meta","payload":{"id":"session-1","timestamp":"2026-06-24T13:05:12Z","cwd":"C:\\Working\\CodexSpendMonitor","originator":"Codex Desktop","cli_version":"0.140.0-alpha.2","model_provider":"openai"}}`,
+		`{"timestamp":"2026-06-24T13:05:33Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-06-24T13:05:34Z","type":"event_msg","payload":{"type":"token_count","info":null}}`,
+		`{"timestamp":"2026-06-24T13:05:41Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":17647,"cached_input_tokens":2432,"output_tokens":339,"reasoning_output_tokens":87,"total_tokens":17986},"last_token_usage":{"input_tokens":17647,"cached_input_tokens":2432,"output_tokens":339,"reasoning_output_tokens":87,"total_tokens":17986}}}}`,
+		`{"timestamp":"2026-06-24T13:05:44Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":17647,"cached_input_tokens":2432,"output_tokens":339,"reasoning_output_tokens":87,"total_tokens":17986},"last_token_usage":{"input_tokens":17647,"cached_input_tokens":2432,"output_tokens":339,"reasoning_output_tokens":87,"total_tokens":17986}}}}`,
+		`{"timestamp":"2026-06-24T13:05:52Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35749,"cached_input_tokens":4864,"output_tokens":727,"reasoning_output_tokens":101,"total_tokens":36476},"last_token_usage":{"input_tokens":18102,"cached_input_tokens":2432,"output_tokens":388,"reasoning_output_tokens":14,"total_tokens":18490}}}}`,
+	}, "\n"))
+
+	got, err := parseSessionFile(input, "session.jsonl")
+	if err != nil {
+		t.Fatalf("parseSessionFile() error = %v", err)
+	}
+	if len(got.Events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(got.Events))
+	}
+
+	first := got.Events[0]
+	if first.Timestamp.Format(time.RFC3339) != "2026-06-24T13:05:41Z" {
+		t.Fatalf("first timestamp = %s, want 2026-06-24T13:05:41Z", first.Timestamp.Format(time.RFC3339))
+	}
+
+	second := got.Events[1]
+	if second.InputTokens != 18102 || second.CachedInputTokens != 2432 || second.OutputTokens != 388 {
+		t.Fatalf("second event = %+v", second)
+	}
+}
+
+func TestParseSessionFileFallsBackToLastTokenUsageWithoutCumulativeTotal(t *testing.T) {
+	t.Parallel()
+
+	input := strings.NewReader(strings.Join([]string{
+		`{"timestamp":"2026-06-23T16:24:08Z","type":"session_meta","payload":{"id":"session-1","timestamp":"2026-06-23T16:24:08Z","cwd":"C:\\Working\\CodexSpendMonitor","originator":"Codex Desktop","cli_version":"0.140.0-alpha.2","model_provider":"openai"}}`,
+		`{"timestamp":"2026-06-23T16:24:09Z","type":"turn_context","payload":{"model":"gpt-5.5"}}`,
+		`{"timestamp":"2026-06-23T16:24:10Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":250,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050}}}}`,
+	}, "\n"))
+
+	got, err := parseSessionFile(input, "session.jsonl")
+	if err != nil {
+		t.Fatalf("parseSessionFile() error = %v", err)
+	}
+	if len(got.Events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(got.Events))
+	}
+	event := got.Events[0]
+	if event.InputTokens != 1000 || event.CachedInputTokens != 250 || event.OutputTokens != 50 || event.TotalTokens != 1050 {
+		t.Fatalf("event = %+v", event)
 	}
 }
