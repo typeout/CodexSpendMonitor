@@ -1,9 +1,15 @@
 package ingest
 
 import (
+	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"codexspendmonitor/internal/store"
 )
 
 func TestParseSessionFile(t *testing.T) {
@@ -97,5 +103,70 @@ func TestParseSessionFileFallsBackToLastTokenUsageWithoutCumulativeTotal(t *test
 	event := got.Events[0]
 	if event.InputTokens != 1000 || event.CachedInputTokens != 250 || event.OutputTokens != 50 || event.TotalTokens != 1050 {
 		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestScanSkipsActiveFileWithoutSessionMeta(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+
+	codexPath := t.TempDir()
+	sessionsDir := filepath.Join(codexPath, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "active.jsonl"), []byte(`{"timestamp":"2026-06-23T16:24:08Z"`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	scanner := NewScanner(db, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	result, err := scanner.Scan(ctx, codexPath)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Files != 0 || result.Sessions != 0 || result.Events != 0 {
+		t.Fatalf("Scan() = %+v, want no imported files", result)
+	}
+
+	_, sessions, err := db.Dashboard(ctx)
+	if err != nil {
+		t.Fatalf("Dashboard() error = %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("len(sessions) = %d, want 0", len(sessions))
+	}
+}
+
+func TestSameFileSnapshot(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte("one"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(before) error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo"), 0o644); err != nil {
+		t.Fatalf("WriteFile(update) error = %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(after) error = %v", err)
+	}
+
+	if sameFileSnapshot(before, after) {
+		t.Fatalf("sameFileSnapshot() = true, want false")
 	}
 }
