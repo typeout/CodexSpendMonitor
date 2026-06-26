@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"codexspendmonitor/internal/store"
@@ -21,6 +22,7 @@ import (
 type Scanner struct {
 	store  *store.Store
 	logger *slog.Logger
+	mu     sync.Mutex
 }
 
 type ScanResult struct {
@@ -76,11 +78,16 @@ type responseItemPayload struct {
 
 const longContextInputThreshold = 128_000
 
+var errSessionNotReady = errors.New("session file is not ready")
+
 func NewScanner(store *store.Store, logger *slog.Logger) *Scanner {
 	return &Scanner{store: store, logger: logger}
 }
 
 func (s *Scanner) Scan(ctx context.Context, codexPath string) (ScanResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var result ScanResult
 	files, err := sessionFiles(codexPath)
 	if err != nil {
@@ -96,6 +103,9 @@ func (s *Scanner) Scan(ctx context.Context, codexPath string) (ScanResult, error
 
 		fileResult, err := s.importFile(ctx, path)
 		if err != nil {
+			if errors.Is(err, errSessionNotReady) {
+				continue
+			}
 			s.logger.Warn("import session file", "path", path, "error", err)
 			continue
 		}
@@ -169,7 +179,7 @@ func (s *Scanner) importFile(ctx context.Context, path string) (result ScanResul
 	}
 
 	if parsed.Session.ID == "" {
-		return result, fmt.Errorf("missing session_meta id")
+		return result, errSessionNotReady
 	}
 	if err := s.store.UpsertSession(ctx, parsed.Session); err != nil {
 		return result, err
@@ -189,11 +199,21 @@ func (s *Scanner) importFile(ctx context.Context, path string) (result ScanResul
 		result.Events++
 	}
 
-	if err := s.store.RecordImportedFile(ctx, path, info.Size(), info.ModTime(), hex.EncodeToString(hash.Sum(nil))); err != nil {
-		return result, err
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		return result, fmt.Errorf("stat file after import: %w", err)
+	}
+	if sameFileSnapshot(info, afterInfo) {
+		if err := s.store.RecordImportedFile(ctx, path, afterInfo.Size(), afterInfo.ModTime(), hex.EncodeToString(hash.Sum(nil))); err != nil {
+			return result, err
+		}
 	}
 	result.MalformedLines = parsed.MalformedLines
 	return result, nil
+}
+
+func sameFileSnapshot(before, after os.FileInfo) bool {
+	return before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
 }
 
 type parsedSession struct {
