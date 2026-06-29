@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -154,6 +155,20 @@ type DailySpend struct {
 	Day            string
 	TotalCost      float64
 	UnpricedEvents int
+}
+
+type UsageTokenSeriesPoint struct {
+	Day                 string
+	Model               string
+	UncachedInputTokens int64
+	CachedInputTokens   int64
+	OutputTokens        int64
+}
+
+type UsageCreditSeriesPoint struct {
+	Day   string
+	Model string
+	Cost  float64
 }
 
 // Open creates or opens the SQLite database at path and applies the app schema.
@@ -1094,6 +1109,162 @@ func (s *Store) DailySpendForDay(ctx context.Context, day time.Time) (DailySpend
 		}
 	}
 	return spend, nil
+}
+
+func (s *Store) UsageTokenSeries(ctx context.Context, since time.Time) (points []UsageTokenSeriesPoint, err error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			e.timestamp,
+			e.model,
+			SUM(CASE
+				WHEN e.input_tokens > e.cached_input_tokens THEN e.input_tokens - e.cached_input_tokens
+				ELSE 0
+			END) AS uncached_input_tokens,
+			SUM(e.cached_input_tokens) AS cached_input_tokens,
+			SUM(e.output_tokens + e.reasoning_output_tokens) AS output_tokens
+		FROM usage_events e
+		WHERE e.timestamp >= ?
+		GROUP BY e.timestamp, e.model
+		ORDER BY e.timestamp ASC, e.model ASC
+	`, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("querying usage token series: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing usage token series rows: %w", closeErr))
+		}
+	}()
+
+	loc := since.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	byKey := map[string]*UsageTokenSeriesPoint{}
+	for rows.Next() {
+		var ts string
+		var model string
+		var uncachedInputTokens, cachedInputTokens, outputTokens int64
+		if err := rows.Scan(&ts, &model, &uncachedInputTokens, &cachedInputTokens, &outputTokens); err != nil {
+			return nil, fmt.Errorf("scanning usage token series: %w", err)
+		}
+
+		day := parseStoredTime(ts).In(loc).Format("2006-01-02")
+		key := day + "\x00" + model
+		point := byKey[key]
+		if point == nil {
+			point = &UsageTokenSeriesPoint{
+				Day:   day,
+				Model: model,
+			}
+			byKey[key] = point
+		}
+		point.UncachedInputTokens += uncachedInputTokens
+		point.CachedInputTokens += cachedInputTokens
+		point.OutputTokens += outputTokens
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating usage token series: %w", err)
+	}
+
+	for _, point := range byKey {
+		points = append(points, *point)
+	}
+	sort.SliceStable(points, func(i, j int) bool {
+		if points[i].Day == points[j].Day {
+			return points[i].Model < points[j].Model
+		}
+		return points[i].Day < points[j].Day
+	})
+	return points, nil
+}
+
+func (s *Store) UsageCreditSeries(ctx context.Context, since time.Time) (points []UsageCreditSeriesPoint, err error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			e.timestamp,
+			e.model,
+			SUM(
+				(
+					(CASE
+						WHEN e.input_tokens > e.cached_input_tokens THEN e.input_tokens - e.cached_input_tokens
+						ELSE 0
+					END) * p.input_per_million
+				) +
+				(e.cached_input_tokens * p.cached_input_per_million) +
+				(e.output_tokens * p.output_per_million)
+			) / 1000000.0 AS cost
+		FROM usage_events e
+		JOIN pricing_snapshots p ON p.id = (
+			SELECT id FROM pricing_snapshots
+			WHERE model = lower(e.model)
+				AND billing_tier = e.billing_tier
+				AND context_kind = e.context_kind
+			ORDER BY fetched_at DESC
+			LIMIT 1
+		)
+		WHERE e.timestamp >= ?
+		GROUP BY e.timestamp, e.model
+		HAVING SUM(
+			(
+				(CASE
+					WHEN e.input_tokens > e.cached_input_tokens THEN e.input_tokens - e.cached_input_tokens
+					ELSE 0
+				END) * p.input_per_million
+			) +
+			(e.cached_input_tokens * p.cached_input_per_million) +
+			(e.output_tokens * p.output_per_million)
+		) > 0
+		ORDER BY e.timestamp ASC, e.model ASC
+	`, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("querying usage credit series: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing usage credit series rows: %w", closeErr))
+		}
+	}()
+
+	loc := since.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	byKey := map[string]*UsageCreditSeriesPoint{}
+	for rows.Next() {
+		var ts string
+		var model string
+		var cost float64
+		if err := rows.Scan(&ts, &model, &cost); err != nil {
+			return nil, fmt.Errorf("scanning usage credit series: %w", err)
+		}
+
+		day := parseStoredTime(ts).In(loc).Format("2006-01-02")
+		key := day + "\x00" + model
+		point := byKey[key]
+		if point == nil {
+			point = &UsageCreditSeriesPoint{
+				Day:   day,
+				Model: model,
+			}
+			byKey[key] = point
+		}
+		point.Cost += cost
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating usage credit series: %w", err)
+	}
+
+	for _, point := range byKey {
+		points = append(points, *point)
+	}
+	sort.SliceStable(points, func(i, j int) bool {
+		if points[i].Day == points[j].Day {
+			return points[i].Model < points[j].Model
+		}
+		return points[i].Day < points[j].Day
+	})
+	return points, nil
 }
 
 func (s *Store) allEventDetails(ctx context.Context, sessionID string) (events []EventDetail, err error) {
