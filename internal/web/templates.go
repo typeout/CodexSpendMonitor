@@ -194,11 +194,11 @@ const pagesHTML = `
                 }
                 const color = opts.w.globals.colors[index];
                 const name = opts.w.globals.seriesNames[index];
-                return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px"><span><span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:' + color + ';margin-right:6px"></span>' + name + '</span><strong>' + formatChartValue(payload.valueKind, value) + '</strong></div>';
+                return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px;font-size:13px;line-height:1.35"><span><span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:' + color + ';margin-right:6px"></span>' + name + '</span><span style="font-weight:500">' + formatChartValue(payload.valueKind, value) + '</span></div>';
               })
               .filter(Boolean)
               .join('');
-            return '<div style="padding:10px 12px;min-width:220px"><div style="font-weight:600">' + new Date(payload.labels[opts.dataPointIndex]).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) + '</div>' + rows + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(120,120,120,.25)"><span>Total</span><strong>' + formatChartValue(payload.valueKind, total) + '</strong></div></div>';
+            return '<div style="padding:10px 12px;min-width:220px;font-size:13px;line-height:1.35"><div style="font-weight:600;margin-bottom:2px">' + new Date(payload.labels[opts.dataPointIndex]).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) + '</div>' + rows + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(120,120,120,.25)"><span>Total</span><span style="font-weight:600">' + formatChartValue(payload.valueKind, total) + '</span></div></div>';
           },
         },
       };
