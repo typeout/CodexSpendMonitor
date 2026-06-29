@@ -46,3 +46,8 @@ Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath("Startup")) "C
 ## Notes
 
 The displayed spend is API-equivalent: it is calculated from locally observed token counts and OpenAI API-style prices. It is not an invoice reconciliation tool.
+
+The dashboard usage charts load ApexCharts from a CDN. ApexCharts is subject to its own license and terms:
+
+- https://apexcharts.com/pricing/
+- https://apexcharts.com/legal/terms/
