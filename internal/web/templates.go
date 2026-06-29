@@ -145,7 +145,7 @@ const pagesHTML = `
         },
         fill: {
           type: 'solid',
-          opacity: 0.72,
+          opacity: 0.58,
         },
         dataLabels: { enabled: false },
         markers: { size: 0 },

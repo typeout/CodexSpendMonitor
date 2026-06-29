@@ -761,15 +761,15 @@ func modelColorVariant(model, kind string) string {
 	h := modelHue(model)
 	switch kind {
 	case "total":
-		return fmt.Sprintf("hsl(%d 58%% 72%%)", h)
+		return fmt.Sprintf("hsl(%d 66%% 58%%)", h)
 	case "cached":
-		return fmt.Sprintf("hsl(%d 42%% 82%%)", h)
+		return fmt.Sprintf("hsl(%d 54%% 74%%)", h)
 	case "output":
-		return fmt.Sprintf("hsl(%d 64%% 66%%)", h)
+		return fmt.Sprintf("hsl(%d 78%% 50%%)", h)
 	case "credit":
-		return fmt.Sprintf("hsl(%d 54%% 76%%)", h)
+		return fmt.Sprintf("hsl(%d 62%% 54%%)", h)
 	default:
-		return fmt.Sprintf("hsl(%d 50%% 78%%)", h)
+		return fmt.Sprintf("hsl(%d 62%% 60%%)", h)
 	}
 }
 
