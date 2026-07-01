@@ -187,6 +187,276 @@ func TestDashboardIncludesToolUsageCost(t *testing.T) {
 	}
 }
 
+func TestUsageTokenSeriesAggregatesByLocalDayAndType(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := openTestStore(t, ctx)
+	t.Cleanup(func() { _ = db.Close() })
+
+	loc := time.FixedZone("CDT", -5*60*60)
+	since := time.Date(2026, 6, 23, 0, 0, 0, 0, loc)
+	session := Session{
+		ID:            "token-series-session",
+		SourcePath:    `C:\Users\Alice\.codex\sessions\token-series.jsonl`,
+		StartedAt:     since.UTC(),
+		CWD:           `C:\Working\Series`,
+		Originator:    "Codex Desktop",
+		CLIVersion:    "test",
+		ModelProvider: "openai",
+		Title:         "Token Series",
+	}
+	if err := db.UpsertSession(ctx, session); err != nil {
+		t.Fatalf("UpsertSession() error = %v", err)
+	}
+
+	events := []UsageEvent{
+		{
+			SessionID:             session.ID,
+			EventIndex:            1,
+			Timestamp:             time.Date(2026, 6, 24, 3, 10, 0, 0, time.UTC),
+			Model:                 "gpt-a",
+			InputTokens:           100,
+			CachedInputTokens:     25,
+			OutputTokens:          10,
+			ReasoningOutputTokens: 5,
+			TotalTokens:           115,
+			RawJSON:               "{}",
+		},
+		{
+			SessionID:             session.ID,
+			EventIndex:            2,
+			Timestamp:             time.Date(2026, 6, 24, 4, 45, 0, 0, time.UTC),
+			Model:                 "gpt-a",
+			InputTokens:           60,
+			CachedInputTokens:     10,
+			OutputTokens:          4,
+			ReasoningOutputTokens: 6,
+			TotalTokens:           70,
+			RawJSON:               "{}",
+		},
+		{
+			SessionID:             session.ID,
+			EventIndex:            3,
+			Timestamp:             time.Date(2026, 6, 24, 7, 0, 0, 0, time.UTC),
+			Model:                 "gpt-a",
+			InputTokens:           40,
+			CachedInputTokens:     5,
+			OutputTokens:          3,
+			ReasoningOutputTokens: 2,
+			TotalTokens:           45,
+			RawJSON:               "{}",
+		},
+	}
+	for _, event := range events {
+		if err := db.UpsertUsageEvent(ctx, event); err != nil {
+			t.Fatalf("UpsertUsageEvent() error = %v", err)
+		}
+	}
+
+	points, err := db.UsageTokenSeries(ctx, since)
+	if err != nil {
+		t.Fatalf("UsageTokenSeries() error = %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("len(points) = %d, want 2", len(points))
+	}
+
+	if points[0].Day != "2026-06-23" || points[0].Model != "gpt-a" {
+		t.Fatalf("points[0] = %+v, want first local day bucket", points[0])
+	}
+	if points[0].UncachedInputTokens != 125 || points[0].CachedInputTokens != 35 || points[0].OutputTokens != 25 {
+		t.Fatalf("points[0] = %+v, want uncached=125 cached=35 output=25", points[0])
+	}
+	if points[1].Day != "2026-06-24" || points[1].OutputTokens != 5 {
+		t.Fatalf("points[1] = %+v, want second local day bucket with output=5", points[1])
+	}
+}
+
+func TestUsageCreditSeriesUsesLatestPricingAndExcludesUnpricedAndTools(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := openTestStore(t, ctx)
+	t.Cleanup(func() { _ = db.Close() })
+
+	loc := time.FixedZone("CDT", -5*60*60)
+	since := time.Date(2026, 6, 23, 0, 0, 0, 0, loc)
+	startedAt := since.UTC()
+	session := Session{
+		ID:            "credit-series-session",
+		SourcePath:    `C:\Users\Alice\.codex\sessions\credit-series.jsonl`,
+		StartedAt:     startedAt,
+		CWD:           `C:\Working\Series`,
+		Originator:    "Codex Desktop",
+		CLIVersion:    "test",
+		ModelProvider: "openai",
+		Title:         "Credit Series",
+	}
+	if err := db.UpsertSession(ctx, session); err != nil {
+		t.Fatalf("UpsertSession() error = %v", err)
+	}
+	if err := db.UpsertPricing(ctx, PricingSnapshot{
+		SourceURL:             "test",
+		FetchedAt:             time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC),
+		Model:                 "gpt-a",
+		BillingTier:           "standard",
+		ContextKind:           "short",
+		InputPerMillion:       1,
+		CachedInputPerMillion: 0.5,
+		OutputPerMillion:      2,
+	}); err != nil {
+		t.Fatalf("UpsertPricing(old) error = %v", err)
+	}
+	if err := db.UpsertPricing(ctx, PricingSnapshot{
+		SourceURL:             "test",
+		FetchedAt:             time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC),
+		Model:                 "gpt-a",
+		BillingTier:           "standard",
+		ContextKind:           "short",
+		InputPerMillion:       4,
+		CachedInputPerMillion: 1,
+		OutputPerMillion:      8,
+	}); err != nil {
+		t.Fatalf("UpsertPricing(new) error = %v", err)
+	}
+	if err := db.UpsertToolPricing(ctx, ToolPricingSnapshot{
+		SourceURL:    "test",
+		FetchedAt:    startedAt,
+		ToolKey:      "web_search",
+		DisplayName:  "Web search",
+		UnitLabel:    "call",
+		UnitSize:     1,
+		PricePerUnit: 50,
+	}); err != nil {
+		t.Fatalf("UpsertToolPricing() error = %v", err)
+	}
+
+	usageEvents := []UsageEvent{
+		{
+			SessionID:         session.ID,
+			EventIndex:        1,
+			Timestamp:         time.Date(2026, 6, 24, 3, 0, 0, 0, time.UTC),
+			Model:             "gpt-a",
+			InputTokens:       1000,
+			CachedInputTokens: 200,
+			OutputTokens:      50,
+			TotalTokens:       1050,
+			RawJSON:           "{}",
+		},
+		{
+			SessionID:   session.ID,
+			EventIndex:  2,
+			Timestamp:   time.Date(2026, 6, 24, 4, 0, 0, 0, time.UTC),
+			Model:       "gpt-unpriced",
+			InputTokens: 999,
+			TotalTokens: 999,
+			RawJSON:     "{}",
+		},
+	}
+	for _, event := range usageEvents {
+		if err := db.UpsertUsageEvent(ctx, event); err != nil {
+			t.Fatalf("UpsertUsageEvent() error = %v", err)
+		}
+	}
+	if err := db.UpsertToolUsageEvent(ctx, ToolUsageEvent{
+		SessionID:  session.ID,
+		EventIndex: 3,
+		Timestamp:  time.Date(2026, 6, 24, 3, 30, 0, 0, time.UTC),
+		ToolKey:    "web_search",
+		ToolName:   "web.run",
+		Quantity:   2,
+		RawJSON:    "{}",
+	}); err != nil {
+		t.Fatalf("UpsertToolUsageEvent() error = %v", err)
+	}
+
+	points, err := db.UsageCreditSeries(ctx, since)
+	if err != nil {
+		t.Fatalf("UsageCreditSeries() error = %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	if points[0].Day != "2026-06-23" || points[0].Model != "gpt-a" {
+		t.Fatalf("points[0] = %+v, want priced local day bucket for gpt-a", points[0])
+	}
+	const want = (800*4 + 200*1 + 50*8) / 1_000_000.0
+	if points[0].Cost != want {
+		t.Fatalf("points[0].Cost = %.8f, want %.8f", points[0].Cost, want)
+	}
+}
+
+func TestUsageCreditSeriesStableOrderingAndEmptyWindow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := openTestStore(t, ctx)
+	t.Cleanup(func() { _ = db.Close() })
+
+	loc := time.FixedZone("CDT", -5*60*60)
+	since := time.Date(2026, 6, 23, 0, 0, 0, 0, loc)
+	session := Session{
+		ID:            "ordering-session",
+		SourcePath:    `C:\Users\Alice\.codex\sessions\ordering.jsonl`,
+		StartedAt:     since.UTC(),
+		CWD:           `C:\Working\Series`,
+		Originator:    "Codex Desktop",
+		CLIVersion:    "test",
+		ModelProvider: "openai",
+		Title:         "Ordering",
+	}
+	if err := db.UpsertSession(ctx, session); err != nil {
+		t.Fatalf("UpsertSession() error = %v", err)
+	}
+	for _, model := range []string{"gpt-b", "gpt-a"} {
+		if err := db.UpsertPricing(ctx, PricingSnapshot{
+			SourceURL:             "test",
+			FetchedAt:             since.UTC(),
+			Model:                 model,
+			BillingTier:           "standard",
+			ContextKind:           "short",
+			InputPerMillion:       1,
+			CachedInputPerMillion: 1,
+			OutputPerMillion:      1,
+		}); err != nil {
+			t.Fatalf("UpsertPricing(%s) error = %v", model, err)
+		}
+	}
+	for index, model := range []string{"gpt-b", "gpt-a"} {
+		if err := db.UpsertUsageEvent(ctx, UsageEvent{
+			SessionID:   session.ID,
+			EventIndex:  index + 1,
+			Timestamp:   time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
+			Model:       model,
+			InputTokens: 100,
+			TotalTokens: 100,
+			RawJSON:     "{}",
+		}); err != nil {
+			t.Fatalf("UpsertUsageEvent(%s) error = %v", model, err)
+		}
+	}
+
+	points, err := db.UsageCreditSeries(ctx, since)
+	if err != nil {
+		t.Fatalf("UsageCreditSeries() error = %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("len(points) = %d, want 2", len(points))
+	}
+	if points[0].Model != "gpt-a" || points[1].Model != "gpt-b" {
+		t.Fatalf("points = %+v, want alphabetical ordering for equal totals", points)
+	}
+
+	empty, err := db.UsageCreditSeries(ctx, since.AddDate(0, 1, 0))
+	if err != nil {
+		t.Fatalf("UsageCreditSeries(empty) error = %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("len(empty) = %d, want 0", len(empty))
+	}
+}
+
 func TestEnsureOwnerClearsForeignSessionData(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,7 @@ const pagesHTML = `
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex Spend Monitor</title>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
   <style>
     :root { color-scheme: light dark; --line: #d7dce2; --muted: #637083; --accent: #1f7a5c; --bg: #f7f8fa; --panel: #ffffff; --text: #16202a; }
     @media (prefers-color-scheme: dark) { :root { --line: #303842; --muted: #a2adba; --accent: #58c49d; --bg: #11161c; --panel: #171e26; --text: #eef2f5; } }
@@ -29,6 +30,31 @@ const pagesHTML = `
     .daily { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; }
     .tile { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px; }
     .tile strong { display: block; font-size: 22px; margin-top: 5px; }
+    .section-tabs-wrap { position: relative; margin-top: 22px; padding-bottom: 1px; }
+    .section-tabs-wrap::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; border-bottom: 1px solid var(--line); }
+    .section-tabs { position: relative; z-index: 1; display: inline-flex; gap: 8px; padding: 0 18px 0 0; background: var(--bg); }
+    .section-tab { min-height: 38px; border: 1px solid transparent; border-bottom: 0; border-top-left-radius: 10px; border-top-right-radius: 10px; border-bottom-left-radius: 0; border-bottom-right-radius: 0; padding: 8px 16px 9px; background: color-mix(in srgb, var(--panel) 84%, var(--line)); color: var(--muted); }
+    .section-tab[aria-selected="true"] { border-color: var(--line); background: var(--panel); color: var(--text); box-shadow: 0 1px 0 var(--panel); }
+    .section-panel { margin-top: 0; padding: 18px 18px 20px; border: 1px solid var(--line); border-top: 0; border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; background: var(--panel); box-shadow: 0 12px 30px rgba(15, 23, 34, .04); }
+    .section-panel[hidden] { display: none; }
+    .chart-card { padding: 18px; margin-top: 4px; border-radius: 12px; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }
+    .chart-tabs-wrap { position: relative; margin-bottom: 16px; padding-bottom: 1px; }
+    .chart-tabs-wrap::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; border-bottom: 1px solid var(--line); }
+    .chart-tabs { position: relative; z-index: 1; display: inline-flex; gap: 6px; padding: 0 14px 0 0; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }
+    .chart-tab { min-height: 36px; border: 1px solid transparent; border-bottom: 0; border-top-left-radius: 10px; border-top-right-radius: 10px; border-bottom-left-radius: 0; border-bottom-right-radius: 0; padding: 7px 14px 8px; background: color-mix(in srgb, var(--panel) 84%, var(--line)); color: var(--muted); }
+    .chart-tab[aria-selected="true"] { border-color: var(--line); background: var(--panel); color: var(--text); box-shadow: 0 1px 0 var(--panel); }
+    .chart-panel { margin-top: 0; padding: 12px 2px 0; }
+    .chart-panel[hidden] { display: none; }
+    .chart-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+    .chart-toggle { display: inline-flex; gap: 6px; padding-left: 16px; border-left: 1px solid var(--line); }
+    .chart-toggle button { min-height: 30px; border: 1px solid transparent; border-radius: 999px; padding: 4px 12px; background: transparent; color: var(--muted); }
+    .chart-toggle button[aria-pressed="true"] { border-color: var(--line); background: color-mix(in srgb, var(--panel) 82%, var(--accent)); color: var(--text); }
+    .chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .chart-head strong { font-size: 15px; }
+    .chart-shell { min-height: 320px; }
+    .chart-empty { padding: 20px 0 8px; }
+    .section-panel h2:first-child,
+    .chart-panel .chart-head:first-child { margin-top: 0; }
     table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -48,6 +74,11 @@ const pagesHTML = `
       header { align-items: flex-start; flex-direction: column; }
       form.toolbar { grid-template-columns: 1fr; width: 100%; }
       .daily { grid-template-columns: 1fr 1fr; }
+      .section-tabs { display: flex; gap: 6px; padding-right: 0; overflow-x: auto; }
+      .section-panel { padding: 16px 14px 18px; }
+      .chart-tabs { display: flex; gap: 6px; padding-right: 0; overflow-x: auto; }
+      .chart-card { padding: 14px; }
+      .chart-toolbar { align-items: flex-start; flex-direction: column; }
       table { font-size: 13px; }
       .hide-mobile, th.hide-mobile, td.hide-mobile, .session-details th:nth-child(3), .session-details td:nth-child(3) { display: none; }
     }
@@ -58,6 +89,288 @@ const pagesHTML = `
       const expanded = row.getAttribute('aria-expanded') === 'true';
       row.setAttribute('aria-expanded', String(!expanded));
       detail.hidden = expanded;
+    }
+
+    function ensureDashboardState() {
+      if (!window.codexSpendMonitorDashboard) {
+        window.codexSpendMonitorDashboard = { charts: {}, payloads: {} };
+      }
+      return window.codexSpendMonitorDashboard;
+    }
+
+    function destroyUsageCharts() {
+      const state = ensureDashboardState();
+      Object.keys(state.charts).forEach((key) => {
+        if (state.charts[key]) {
+          state.charts[key].destroy();
+        }
+      });
+      state.charts = {};
+      state.payloads = {};
+    }
+
+    function formatChartValue(kind, value) {
+      if (kind === 'credits') {
+        const fixed = value.toFixed(1).replace(/\.0$/, '');
+        return fixed + ' cr';
+      }
+      return Math.round(value).toLocaleString();
+    }
+
+    function chartSeriesData(payload, series) {
+      return series.map((item) => ({
+        name: item.label,
+        data: item.values.map((value, index) => ({
+          x: payload.labels[index],
+          y: value,
+        })),
+      }));
+    }
+
+    function buildChartOptions(payload, series) {
+      return {
+        chart: {
+          type: 'area',
+          height: 320,
+          stacked: true,
+          toolbar: { show: false },
+          animations: { easing: 'easeinout', speed: 220 },
+          fontFamily: 'Segoe UI, system-ui, sans-serif',
+        },
+        series: chartSeriesData(payload, series),
+        colors: series.map((item) => item.color),
+        stroke: {
+          curve: 'smooth',
+          width: 2,
+        },
+        fill: {
+          type: 'solid',
+          opacity: 0.58,
+        },
+        dataLabels: { enabled: false },
+        markers: { size: 0 },
+        legend: {
+          position: 'top',
+          horizontalAlign: 'left',
+        },
+        grid: {
+          borderColor: getComputedStyle(document.documentElement).getPropertyValue('--line').trim() || '#d7dce2',
+        },
+        xaxis: {
+          type: 'datetime',
+          tickAmount: Math.min(6, Math.max(payload.labels.length-1, 1)),
+          labels: {
+            datetimeUTC: false,
+            rotate: 0,
+            formatter: function(value) {
+              if (value == null || value === '') {
+                return '';
+              }
+              const date = new Date(value);
+              if (!Number.isNaN(date.getTime())) {
+                return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+              }
+              return String(value);
+            },
+          },
+        },
+        yaxis: {
+          labels: {
+            formatter: function(value) {
+              return formatChartValue(payload.valueKind, value);
+            },
+          },
+        },
+        tooltip: {
+          shared: true,
+          intersect: false,
+          custom: function(opts) {
+            const values = opts.series.map((items) => items[opts.dataPointIndex] || 0);
+            const total = values.reduce((sum, value) => sum + value, 0);
+            const rows = values
+              .map((value, index) => {
+                if (value === 0) {
+                  return '';
+                }
+                const color = opts.w.globals.colors[index];
+                const name = opts.w.globals.seriesNames[index];
+                return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px;font-size:13px;line-height:1.35"><span><span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:' + color + ';margin-right:6px"></span>' + name + '</span><span style="font-weight:500">' + formatChartValue(payload.valueKind, value) + '</span></div>';
+              })
+              .filter(Boolean)
+              .join('');
+            return '<div style="padding:10px 12px;min-width:220px;font-size:13px;line-height:1.35"><div style="font-weight:600;margin-bottom:2px">' + new Date(payload.labels[opts.dataPointIndex]).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) + '</div>' + rows + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(120,120,120,.25)"><span>Total</span><span style="font-weight:600">' + formatChartValue(payload.valueKind, total) + '</span></div></div>';
+          },
+        },
+      };
+    }
+
+    function parseChartPayload(id) {
+      const state = ensureDashboardState();
+      if (state.payloads[id]) {
+        return state.payloads[id];
+      }
+      const node = document.getElementById(id);
+      if (!node) {
+        return null;
+      }
+      state.payloads[id] = JSON.parse(node.textContent);
+      return state.payloads[id];
+    }
+
+    function renderUsageChart(chartKey, elementID, payload, series) {
+      const state = ensureDashboardState();
+      const mount = document.getElementById(elementID);
+      if (!mount || !payload || !series || series.length === 0) {
+        return;
+      }
+      if (state.charts[chartKey]) {
+        state.charts[chartKey].destroy();
+      }
+      const chart = new ApexCharts(mount, buildChartOptions(payload, series));
+      chart.render();
+      state.charts[chartKey] = chart;
+    }
+
+    function setTokenChartMode(mode) {
+      const payload = parseChartPayload('token-history-chart-data');
+      if (!payload) {
+        return;
+      }
+      const series = mode === 'split' ? payload.alternateSeries : payload.series;
+      renderUsageChart('token', 'token-history-chart', payload, series);
+      document.querySelectorAll('[data-token-mode]').forEach((button) => {
+        const active = button.dataset.tokenMode === mode;
+        button.setAttribute('aria-pressed', String(active));
+      });
+    }
+
+    function activateGraphTab(tabID) {
+      document.querySelectorAll('[data-graph-tab]').forEach((button) => {
+        const active = button.dataset.graphTab === tabID;
+        button.setAttribute('aria-selected', String(active));
+        button.tabIndex = active ? 0 : -1;
+      });
+      document.querySelectorAll('[data-graph-panel]').forEach((panel) => {
+        panel.hidden = panel.dataset.graphPanel !== tabID;
+      });
+      if (tabID === 'tokens') {
+        setTokenChartMode('total');
+      } else if (tabID === 'credits') {
+        const payload = parseChartPayload('credit-history-chart-data');
+        if (payload) {
+          renderUsageChart('credit', 'credit-history-chart', payload, payload.series);
+        }
+      }
+    }
+
+    function activateSectionTab(tabID) {
+      document.querySelectorAll('[data-section-tab]').forEach((button) => {
+        const active = button.dataset.sectionTab === tabID;
+        button.setAttribute('aria-selected', String(active));
+        button.tabIndex = active ? 0 : -1;
+      });
+      document.querySelectorAll('[data-section-panel]').forEach((panel) => {
+        panel.hidden = panel.dataset.sectionPanel !== tabID;
+      });
+      if (tabID === 'usage') {
+        activateGraphTab('tokens');
+      }
+    }
+
+    function handleGraphTabKeydown(event) {
+      const tabs = Array.from(document.querySelectorAll('[data-graph-tab]'));
+      const index = tabs.indexOf(event.currentTarget);
+      if (index === -1) {
+        return;
+      }
+      let next = index;
+      switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = (index + 1) % tabs.length;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = (index - 1 + tabs.length) % tabs.length;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = tabs.length - 1;
+        break;
+      case 'Enter':
+      case ' ':
+        activateGraphTab(event.currentTarget.dataset.graphTab);
+        event.preventDefault();
+        return;
+      default:
+        return;
+      }
+      tabs[next].focus();
+      event.preventDefault();
+    }
+
+    function handleSectionTabKeydown(event) {
+      const tabs = Array.from(document.querySelectorAll('[data-section-tab]'));
+      const index = tabs.indexOf(event.currentTarget);
+      if (index === -1) {
+        return;
+      }
+      let next = index;
+      switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = (index + 1) % tabs.length;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = (index - 1 + tabs.length) % tabs.length;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = tabs.length - 1;
+        break;
+      case 'Enter':
+      case ' ':
+        activateSectionTab(event.currentTarget.dataset.sectionTab);
+        event.preventDefault();
+        return;
+      default:
+        return;
+      }
+      tabs[next].focus();
+      event.preventDefault();
+    }
+
+    function initializeUsageCharts() {
+      destroyUsageCharts();
+      document.querySelectorAll('[data-section-tab]').forEach((button) => {
+        button.addEventListener('click', function() {
+          activateSectionTab(button.dataset.sectionTab);
+        });
+        button.addEventListener('keydown', handleSectionTabKeydown);
+      });
+      document.querySelectorAll('[data-graph-tab]').forEach((button) => {
+        button.addEventListener('click', function() {
+          activateGraphTab(button.dataset.graphTab);
+        });
+        button.addEventListener('keydown', handleGraphTabKeydown);
+      });
+      document.querySelectorAll('[data-token-mode]').forEach((button) => {
+        button.addEventListener('click', function() {
+          setTokenChartMode(button.dataset.tokenMode);
+        });
+      });
+      activateSectionTab('projects');
+    }
+
+    if (!window.codexSpendMonitorDashboardEventsBound) {
+      document.addEventListener('DOMContentLoaded', initializeUsageCharts);
+      document.addEventListener('htmx:afterSwap', initializeUsageCharts);
+      window.codexSpendMonitorDashboardEventsBound = true;
     }
   </script>
 </head>
@@ -102,6 +415,14 @@ const pagesHTML = `
       </div>
     </div>
 
+    <div class="section-tabs-wrap">
+      <div class="section-tabs" role="tablist" aria-label="Dashboard sections">
+        <button class="section-tab" type="button" role="tab" id="section-tab-projects" aria-selected="true" aria-controls="section-panel-projects" tabindex="0" data-section-tab="projects">Projects</button>
+        <button class="section-tab" type="button" role="tab" id="section-tab-usage" aria-selected="false" aria-controls="section-panel-usage" tabindex="-1" data-section-tab="usage">Usage Over Time</button>
+      </div>
+    </div>
+
+    <section class="section-panel" id="section-panel-projects" role="tabpanel" aria-labelledby="section-tab-projects" data-section-panel="projects">
     <h2>Projects</h2>
     <table>
       <colgroup>
@@ -163,6 +484,53 @@ const pagesHTML = `
         {{end}}
       </tbody>
     </table>
+    </section>
+
+    <section class="section-panel" id="section-panel-usage" role="tabpanel" aria-labelledby="section-tab-usage" data-section-panel="usage" hidden>
+      <h2>Usage Over Time</h2>
+      <section class="tile chart-card">
+        <div class="chart-tabs-wrap">
+          <div class="chart-tabs" role="tablist" aria-label="Usage graphs">
+            <button class="chart-tab" type="button" role="tab" id="graph-tab-tokens" aria-selected="true" aria-controls="graph-panel-tokens" tabindex="0" data-graph-tab="tokens">Tokens</button>
+            <button class="chart-tab" type="button" role="tab" id="graph-tab-credits" aria-selected="false" aria-controls="graph-panel-credits" tabindex="-1" data-graph-tab="credits">Credits</button>
+          </div>
+        </div>
+
+        <section class="chart-panel" id="graph-panel-tokens" role="tabpanel" aria-labelledby="graph-tab-tokens" data-graph-panel="tokens">
+          <div class="chart-toolbar">
+            <div class="chart-head">
+              <strong>{{.TokenChart.Title}}</strong>
+              <span class="meta">{{.TokenChart.Subtitle}}</span>
+            </div>
+            {{if not .TokenChart.Empty}}
+            <div class="chart-toggle" aria-label="Token chart mode">
+              <button type="button" aria-pressed="true" data-token-mode="total" id="token-chart-mode-total">Model total</button>
+              <button type="button" aria-pressed="false" data-token-mode="split" id="token-chart-mode-split">Type split</button>
+            </div>
+            {{end}}
+          </div>
+          {{if .TokenChart.Empty}}
+          <div class="meta chart-empty">No token activity in the last 30 days.</div>
+          {{else}}
+          <div id="{{.TokenChart.ID}}" class="chart-shell"></div>
+          <script type="application/json" id="{{.TokenChart.DataID}}">{{.TokenChart.DataJSON}}</script>
+          {{end}}
+        </section>
+
+        <section class="chart-panel" id="graph-panel-credits" role="tabpanel" aria-labelledby="graph-tab-credits" data-graph-panel="credits" hidden>
+          <div class="chart-head">
+            <strong>{{.CreditChart.Title}}</strong>
+            <span class="meta">{{.CreditChart.Subtitle}}</span>
+          </div>
+          {{if .CreditChart.Empty}}
+          <div class="meta chart-empty">No priced model usage in the last 30 days.</div>
+          {{else}}
+          <div id="{{.CreditChart.ID}}" class="chart-shell"></div>
+          <script type="application/json" id="{{.CreditChart.DataID}}">{{.CreditChart.DataJSON}}</script>
+          {{end}}
+        </section>
+      </section>
+    </section>
   </main>
 </body>
 </html>

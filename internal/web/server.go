@@ -3,8 +3,10 @@ package web
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -31,6 +33,8 @@ type dashboardView struct {
 	CodexPath      string
 	PricingRefresh string
 	Totals         periodTotals
+	TokenChart     dashboardChart
+	CreditChart    dashboardChart
 	Projects       []projectView
 	Message        string
 	Error          string
@@ -66,6 +70,32 @@ type pricingView struct {
 	Message    string
 	Error      string
 }
+
+type dashboardChart struct {
+	ID       string
+	DataID   string
+	Title    string
+	Subtitle string
+	Empty    bool
+	DataJSON template.JS
+}
+
+type dashboardChartPayload struct {
+	ValueKind       string            `json:"valueKind"`
+	Labels          []string          `json:"labels"`
+	Series          []dashboardSeries `json:"series"`
+	AlternateSeries []dashboardSeries `json:"alternateSeries,omitempty"`
+}
+
+type dashboardSeries struct {
+	Key    string    `json:"key"`
+	Label  string    `json:"label"`
+	Color  string    `json:"color"`
+	Values []float64 `json:"values"`
+}
+
+const dashboardHistoryDays = 30
+const dollarsPerCredit = 0.04
 
 func NewServer(db *store.Store, scanner *ingest.Scanner, pricingService *pricing.Service, logger *slog.Logger) *Server {
 	funcs := template.FuncMap{
@@ -394,6 +424,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, message, renderErr string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	now := time.Now()
+	since := startOfDay(now).AddDate(0, 0, -(dashboardHistoryDays - 1))
 
 	path, _, err := s.store.Setting(ctx, store.SettingCodexPath)
 	if err != nil {
@@ -402,6 +434,16 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, message
 	daily, sessions, err := s.store.Dashboard(ctx)
 	if err != nil {
 		s.logger.Warn("load dashboard", "error", err)
+		renderErr = "Could not load dashboard data."
+	}
+	tokenSeries, err := s.store.UsageTokenSeries(ctx, since)
+	if err != nil {
+		s.logger.Warn("load usage token series", "error", err)
+		renderErr = "Could not load dashboard data."
+	}
+	creditSeries, err := s.store.UsageCreditSeries(ctx, since)
+	if err != nil {
+		s.logger.Warn("load usage credit series", "error", err)
 		renderErr = "Could not load dashboard data."
 	}
 	refreshText := "never"
@@ -413,7 +455,9 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, message
 	view := dashboardView{
 		CodexPath:      path,
 		PricingRefresh: refreshText,
-		Totals:         buildPeriodTotals(daily, time.Now()),
+		Totals:         buildPeriodTotals(daily, now),
+		TokenChart:     buildTokenChart(tokenSeries, since, now),
+		CreditChart:    buildCreditChart(creditSeries, since, now),
 		Projects:       buildProjects(sessions),
 		Message:        message,
 		Error:          renderErr,
@@ -504,4 +548,233 @@ func projectName(path string) string {
 		return path
 	}
 	return name
+}
+
+func buildTokenChart(points []store.UsageTokenSeriesPoint, since, now time.Time) dashboardChart {
+	labels := buildChartLabels(since, now)
+	indexByDay := make(map[string]int, len(labels))
+	for i, label := range labels {
+		indexByDay[label] = i
+	}
+
+	type tokenSeriesData struct {
+		total    []float64
+		uncached []float64
+		cached   []float64
+		output   []float64
+	}
+
+	byModel := map[string]*tokenSeriesData{}
+	modelTotals := map[string]float64{}
+	for _, point := range points {
+		index, ok := indexByDay[point.Day]
+		if !ok {
+			continue
+		}
+		model := byModel[point.Model]
+		if model == nil {
+			model = &tokenSeriesData{
+				total:    make([]float64, len(labels)),
+				uncached: make([]float64, len(labels)),
+				cached:   make([]float64, len(labels)),
+				output:   make([]float64, len(labels)),
+			}
+			byModel[point.Model] = model
+		}
+		uncached := float64(point.UncachedInputTokens)
+		cached := float64(point.CachedInputTokens)
+		output := float64(point.OutputTokens)
+		total := uncached + cached + output
+		model.total[index] += total
+		model.uncached[index] += uncached
+		model.cached[index] += cached
+		model.output[index] += output
+		modelTotals[point.Model] += total
+	}
+
+	models := sortedModelsByTotal(modelTotals)
+	payload := dashboardChartPayload{
+		ValueKind: "tokens",
+		Labels:    labels,
+	}
+	for _, model := range models {
+		data := byModel[model]
+		if data == nil {
+			continue
+		}
+		totalSeries := dashboardSeries{
+			Key:    model,
+			Label:  model,
+			Color:  modelColorVariant(model, "total"),
+			Values: data.total,
+		}
+		variants := []struct {
+			key    string
+			label  string
+			color  string
+			values []float64
+		}{
+			{
+				key:    model + ":uncached_input",
+				label:  model + " uncached",
+				color:  modelColorVariant(model, "uncached"),
+				values: data.uncached,
+			},
+			{
+				key:    model + ":cached_input",
+				label:  model + " cached",
+				color:  modelColorVariant(model, "cached"),
+				values: data.cached,
+			},
+			{
+				key:    model + ":output",
+				label:  model + " output",
+				color:  modelColorVariant(model, "output"),
+				values: data.output,
+			},
+		}
+		if seriesTotal(totalSeries.Values) > 0 {
+			payload.Series = append(payload.Series, totalSeries)
+		}
+		for _, variant := range variants {
+			series := dashboardSeries{
+				Key:    variant.key,
+				Label:  variant.label,
+				Color:  variant.color,
+				Values: variant.values,
+			}
+			if seriesTotal(series.Values) == 0 {
+				continue
+			}
+			payload.AlternateSeries = append(payload.AlternateSeries, series)
+		}
+	}
+
+	return dashboardChart{
+		ID:       "token-history-chart",
+		DataID:   "token-history-chart-data",
+		Title:    "Tokens by model",
+		Subtitle: "Last 30 local days",
+		Empty:    len(payload.Series) == 0,
+		DataJSON: mustChartJSON(payload),
+	}
+}
+
+func buildCreditChart(points []store.UsageCreditSeriesPoint, since, now time.Time) dashboardChart {
+	labels := buildChartLabels(since, now)
+	indexByDay := make(map[string]int, len(labels))
+	for i, label := range labels {
+		indexByDay[label] = i
+	}
+
+	byModel := map[string]float64{}
+	for _, point := range points {
+		byModel[point.Model] += point.Cost
+	}
+
+	models := sortedModelsByTotal(byModel)
+
+	payload := dashboardChartPayload{
+		ValueKind: "credits",
+		Labels:    labels,
+	}
+	for _, model := range models {
+		color := modelColorVariant(model, "credit")
+		series := dashboardSeries{
+			Key:    model,
+			Label:  model,
+			Color:  color,
+			Values: make([]float64, len(labels)),
+		}
+		for _, point := range points {
+			if point.Model != model {
+				continue
+			}
+			index, ok := indexByDay[point.Day]
+			if !ok {
+				continue
+			}
+			series.Values[index] += point.Cost / dollarsPerCredit
+		}
+		if seriesTotal(series.Values) == 0 {
+			continue
+		}
+		payload.Series = append(payload.Series, series)
+	}
+
+	return dashboardChart{
+		ID:       "credit-history-chart",
+		DataID:   "credit-history-chart-data",
+		Title:    "Credits by model",
+		Subtitle: "Last 30 local days",
+		Empty:    len(payload.Series) == 0,
+		DataJSON: mustChartJSON(payload),
+	}
+}
+
+func buildChartLabels(since, now time.Time) []string {
+	start := startOfDay(since)
+	end := startOfDay(now)
+	labels := make([]string, 0, dashboardHistoryDays)
+	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
+		labels = append(labels, day.Format("2006-01-02"))
+	}
+	return labels
+}
+
+func mustChartJSON(payload dashboardChartPayload) template.JS {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return template.JS(`{"valueKind":"tokens","labels":[],"series":[]}`)
+	}
+	return template.JS(body)
+}
+
+func sortedModelsByTotal(values map[string]float64) []string {
+	models := make([]string, 0, len(values))
+	for model, total := range values {
+		if total <= 0 {
+			continue
+		}
+		models = append(models, model)
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		left := values[models[i]]
+		right := values[models[j]]
+		if left == right {
+			return models[i] < models[j]
+		}
+		return left > right
+	})
+	return models
+}
+
+func seriesTotal(values []float64) float64 {
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func modelColorVariant(model, kind string) string {
+	h := modelHue(model)
+	switch kind {
+	case "total":
+		return fmt.Sprintf("hsl(%d 66%% 58%%)", h)
+	case "cached":
+		return fmt.Sprintf("hsl(%d 54%% 74%%)", h)
+	case "output":
+		return fmt.Sprintf("hsl(%d 78%% 50%%)", h)
+	case "credit":
+		return fmt.Sprintf("hsl(%d 62%% 54%%)", h)
+	default:
+		return fmt.Sprintf("hsl(%d 62%% 60%%)", h)
+	}
+}
+
+func modelHue(model string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(strings.ToLower(strings.TrimSpace(model))))
+	return hash.Sum32() % 360
 }
